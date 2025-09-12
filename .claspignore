@@ -1,0 +1,6 @@
+node_modules/
+**/*.map
+src/
+.eslintrc*
+.prettierrc*
+README.md
