@@ -23,6 +23,13 @@ type Settings = {
   BCC?: string;
   メール件名?: string;
   "メール本文（HTML）"?: string;
+  // Optional mappings parsed from 設定シートの表（複数行）
+  recipientsByCode?: Record<string, string>; // CODE -> to addresses (comma/semicolon separated)
+  namesByCode?: Record<string, string>; // CODE -> institution name
+  ccByCode?: Record<string, string>; // CODE -> CC addresses
+  bccByCode?: Record<string, string>; // CODE -> BCC addresses
+  subjectByCode?: Record<string, string>; // CODE -> メール件名
+  bodyByCode?: Record<string, string>; // CODE -> メール本文（HTML） or カスタムメール本文（HTML）
 };
 
 type LogRow = {

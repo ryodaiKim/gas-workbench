@@ -75,6 +75,10 @@ function getSettings(): Settings {
   if (!values.length) return {} as Settings;
   const headerRow = values[0].map((v) => String(v || '').trim());
   const headerHasMany = headerRow.filter(Boolean).length >= 3; // heuristic for header layout
+  // Detect institution mapping table headers
+  const looksLikeTable = headerRow.includes('登録機関') && headerRow.includes('登録機関コード') && headerRow.includes('送信先アドレス');
+  let recipientsByCode: Record<string, string> | undefined;
+  let namesByCode: Record<string, string> | undefined;
   if (headerHasMany && values.length >= 2) {
     // Header-layout: row1 headers, row2 values
     const data = values[1] || [];
@@ -82,6 +86,23 @@ function getSettings(): Settings {
       if (!h) return;
       map[h] = String((data[i] ?? '')).trim();
     });
+    // Additionally, if the sheet looks like a table, parse all rows into mapping
+    if (looksLikeTable && values.length >= 2) {
+      recipientsByCode = {};
+      namesByCode = {};
+      const idxName = headerRow.indexOf('登録機関');
+      const idxCode = headerRow.indexOf('登録機関コード');
+      const idxTo = headerRow.indexOf('送信先アドレス');
+      for (let r = 1; r < values.length; r++) {
+        const row = values[r];
+        const name = String(row[idxName] || '').trim();
+        const code = String(row[idxCode] || '').trim().toUpperCase();
+        const to = String(row[idxTo] || '').trim();
+        if (!code) continue;
+        if (name) namesByCode[code] = name;
+        if (to) recipientsByCode[code] = to;
+      }
+    }
   } else {
     // Key-value layout: colA key, colB value
     for (let i = 1; i < values.length; i++) {
@@ -91,8 +112,20 @@ function getSettings(): Settings {
     }
   }
   // Synonyms / normalization
-  if (map['登録機関'] && !map['登録機関名']) map['登録機関名'] = map['登録機関'];
-  return map as Settings;
+  // Support backward/forward compatible key aliases to allow header renames in 設定 sheet.
+  const aliases: Array<[from: string, to: string]> = [
+    ['登録機関', '登録機関名'],
+    // Request: allow renaming of subject/body keys
+    ['カスタムメール件名', 'メール件名'],
+    ['カスタムメール本文（HTML）', 'メール本文（HTML）'],
+  ];
+  aliases.forEach(([from, to]) => {
+    if (map[from] && !map[to]) map[to] = map[from];
+  });
+  const settings = map as Settings;
+  if (recipientsByCode) settings.recipientsByCode = recipientsByCode;
+  if (namesByCode) settings.namesByCode = namesByCode;
+  return settings;
 }
 
 function getHeaderMap(sh: GoogleAppsScript.Spreadsheet.Sheet): Map<string, number> {
@@ -184,10 +217,15 @@ function sendMail(toList: string[], subject: string, htmlBody: string, cc?: stri
 
 function buildContext(row: RecordRow, timingDisplay: string, settings: Settings, extra?: Partial<Record<string, string>>): Record<string, string> {
   const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy/MM/dd');
+  const subjectId = String(row.被験者ID || '');
+  const prefix = (subjectId || '').split('-')[0].trim().toUpperCase();
+  const nameFromMap = prefix && (settings as any).namesByCode ? (settings as any).namesByCode[prefix] : '';
+  const instName = String(nameFromMap || settings.登録機関名 || prefix || '');
+  const instCode = String(prefix || settings.登録機関コード || '');
   return {
     被験者ID: String(row.被験者ID || ''),
-    登録機関名: String(settings.登録機関名 || ''),
-    登録機関コード: String(settings.登録機関コード || ''),
+    登録機関名: instName,
+    登録機関コード: instCode,
     送信タイミング: timingDisplay,
     登録日: row.登録日 ? Utilities.formatDate(new Date(row.登録日 as any), Session.getScriptTimeZone(), 'yyyy/MM/dd') : '',
     今日: today,
@@ -214,9 +252,9 @@ function processDueRows() {
   ].join('');
   const subjectTpl = (settings.メール件名 && String(settings.メール件名).trim()) || guideFallback.subject || defaultSubject;
   const bodyTpl = (((settings as any)["メール本文（HTML）"] && String((settings as any)["メール本文（HTML）"]).trim()) || guideFallback.body || defaultBody);
-  const to = splitEmails(settings.送信先アドレス);
-  const ccList = splitEmails((settings as any).CC);
-  const bccList = splitEmails((settings as any).BCC);
+  const globalTo = splitEmails(settings.送信先アドレス);
+  const globalCc = splitEmails((settings as any).CC);
+  const globalBcc = splitEmails((settings as any).BCC);
 
   const tz = Session.getScriptTimeZone();
   const today = Utilities.formatDate(new Date(), tz, 'yyyy/MM/dd');
@@ -267,12 +305,20 @@ function processDueRows() {
         const subject = renderTemplate(subjectTpl, ctx);
         const html = renderTemplate(bodyTpl, ctx);
         try {
-          sendMail(to, subject, html, ccList, bccList);
+          const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID));
+          const toSend = to.length ? to : globalTo;
+          const ccSend = cc.length ? cc : globalCc;
+          const bccSend = bcc.length ? bcc : globalBcc;
+          sendMail(toSend, subject, html, ccSend, bccSend);
           // ログは「原タイミング」（例：1M-1W）で記録する
-          appendLog(row.被験者ID, 登録医療機関, col, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), true);
+          appendLog(row.被験者ID, 登録医療機関, col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          appendLog(row.被験者ID, 登録医療機関, col, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), false, msg);
+          const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID));
+          const toSend = to.length ? to : globalTo;
+          const ccSend = cc.length ? cc : globalCc;
+          const bccSend = bcc.length ? bcc : globalBcc;
+          appendLog(row.被験者ID, 登録医療機関, col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, msg);
         }
       });
     });
@@ -356,8 +402,26 @@ function deriveInstitutionFromId(settings: Settings, subjectId: string): string 
   const code = (settings.登録機関コード || '').trim().toUpperCase();
   const name = (settings.登録機関名 || '').trim();
   if (prefix && code && prefix === code && name) return name;
+  // Prefer name by mapping if available
+  if (prefix && (settings as any).namesByCode && (settings as any).namesByCode[prefix]) {
+    return (settings as any).namesByCode[prefix];
+  }
   return name || prefix || '';
 }
+
+// Choose recipients per subject by prefix mapping; fallback to global 設定
+function getRecipientsForSubject(settings: Settings, subjectId: string): { to: string[]; cc: string[]; bcc: string[] } {
+  const prefix = (subjectId || '').split('-')[0].trim().toUpperCase();
+  const mappedTo = (settings as any).recipientsByCode && prefix ? (settings as any).recipientsByCode[prefix] : '';
+  const mappedCc = (settings as any).ccByCode && prefix ? (settings as any).ccByCode[prefix] : '';
+  const mappedBcc = (settings as any).bccByCode && prefix ? (settings as any).bccByCode[prefix] : '';
+  const to = splitEmails(mappedTo || (settings.送信先アドレス || ''));
+  const cc = splitEmails(mappedCc || (settings as any).CC);
+  const bcc = splitEmails(mappedBcc || (settings as any).BCC);
+  return { to, cc, bcc };
+}
+
+// (removed duplicate simpler implementation)
 
 // --- Diagnostics & Preview ---
 function diagnoseSchema(): string[] {
@@ -651,9 +715,14 @@ function sendOverdueRemindersWithDialog() {
   const first = Utilities.formatDate(items[0].plannedDate, tz, 'yyyy/MM/dd');
   const last = Utilities.formatDate(items[items.length - 1].plannedDate, tz, 'yyyy/MM/dd');
   const ui = SpreadsheetApp.getUi();
+  // Build detailed list like:
+  // 対象: N 件
+  // ・機関名（yyyy/MM/dd）
+  const lines = items.map(it => `・${it.登録医療機関}（${Utilities.formatDate(it.plannedDate, tz, 'yyyy/MM/dd')}）`);
+  const body = `対象: ${items.length} 件\n${lines.join('\n')}\nを送信します`;
   const res = ui.alert(
     '期限超過の未送信を送信',
-    `対象: ${items.length} 件（${first}〜${last}）\nを送信します`,
+    body,
     ui.ButtonSet.OK_CANCEL
   );
   if (res !== ui.Button.OK) {
@@ -683,9 +752,9 @@ function sendOverdueRemindersNow(when: Date): { total: number; success: number; 
   ].join('');
   const subjectTpl = (settings.メール件名 && String(settings.メール件名).trim()) || guideFallback.subject || defaultSubject;
   const bodyTpl = (((settings as any)['メール本文（HTML）'] && String((settings as any)['メール本文（HTML）']).trim()) || guideFallback.body || defaultBody);
-  const to = splitEmails(settings.送信先アドレス);
-  const ccList = splitEmails((settings as any).CC);
-  const bccList = splitEmails((settings as any).BCC);
+  const globalTo = splitEmails(settings.送信先アドレス);
+  const globalCc = splitEmails((settings as any).CC);
+  const globalBcc = splitEmails((settings as any).BCC);
 
   const items = findOverdueCandidates(settings, when);
   if (!items.length) {
@@ -725,14 +794,22 @@ function sendOverdueRemindersNow(when: Date): { total: number; success: number; 
       const ctx = buildContext(rowObj, it.groupLabel, settings, { 評価予定日: evalDateStr });
       const subject = renderTemplate(subjectTpl, ctx);
       const html = renderTemplate(bodyTpl, ctx);
-      sendMail(to, subject, html, ccList, bccList);
-      appendLog(String(rowObj.被験者ID), it.登録医療機関, it.col, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), true);
+      const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj.被験者ID));
+      const toSend = to.length ? to : globalTo;
+      const ccSend = cc.length ? cc : globalCc;
+      const bccSend = bcc.length ? bcc : globalBcc;
+      sendMail(toSend, subject, html, ccSend, bccSend);
+      appendLog(String(rowObj.被験者ID), it.登録医療機関, it.col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
       success++;
     } catch (e) {
       try {
         const rows = getSheetRows(it.sheetName);
         const rowObj = rows[it.row - 2];
-        appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, it.col, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
+        const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj?.被験者ID || it.被験者ID));
+        const toSend = to.length ? to : globalTo;
+        const ccSend = cc.length ? cc : globalCc;
+        const bccSend = bcc.length ? bcc : globalBcc;
+        appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, it.col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
       } catch (_) {
         // ignore logging error
       }
@@ -796,9 +873,9 @@ function sendEvalAlertRemindersNow(): { total: number; success: number; failure:
   ].join('');
   const subjectTpl = (settings.メール件名 && String(settings.メール件名).trim()) || guideFallback.subject || defaultSubject;
   const bodyTpl = (((settings as any)['メール本文（HTML）'] && String((settings as any)['メール本文（HTML）']).trim()) || guideFallback.body || defaultBody);
-  const to = splitEmails(settings.送信先アドレス);
-  const ccList = splitEmails((settings as any).CC);
-  const bccList = splitEmails((settings as any).BCC);
+  const globalTo = splitEmails(settings.送信先アドレス);
+  const globalCc = splitEmails((settings as any).CC);
+  const globalBcc = splitEmails((settings as any).BCC);
 
   const items = findEvalAlertCandidates(settings);
   if (!items.length) return { total: 0, success: 0, failure: 0 };
@@ -832,15 +909,23 @@ function sendEvalAlertRemindersNow(): { total: number; success: number; failure:
       const ctx = buildContext(rowObj, groupLabelFrom(it.group), settings, { 評価予定日: evalDateStr });
       const subject = renderTemplate(subjectTpl, ctx);
       const html = renderTemplate(bodyTpl, ctx);
-      sendMail(to, subject, html, ccList, bccList);
+      const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj.被験者ID));
+      const toSend = to.length ? to : globalTo;
+      const ccSend = cc.length ? cc : globalCc;
+      const bccSend = bcc.length ? bcc : globalBcc;
+      sendMail(toSend, subject, html, ccSend, bccSend);
       // Log with synthetic timing label to distinguish
-      appendLog(String(rowObj.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), true);
+      appendLog(String(rowObj.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
       success++;
     } catch (e) {
       try {
         const rows = getSheetRows(it.sheetName);
         const rowObj = rows[it.row - 2];
-        appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [to.join(','), ccList.join(','), bccList.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
+        const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj?.被験者ID || it.被験者ID));
+        const toSend = to.length ? to : globalTo;
+        const ccSend = cc.length ? cc : globalCc;
+        const bccSend = bcc.length ? bcc : globalBcc;
+        appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
       } catch (_) { /* ignore */ }
       failure++;
     }
