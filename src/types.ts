@@ -12,6 +12,7 @@ type RecordRow = {
   自動送信OnOff: boolean;
   被験者ID: string;
   難プラID?: string;
+  カスタム宛先?: string;
   登録日?: Date | string | null;
 } & Partial<Record<TimingKey, Date | string | null>> & Partial<Record<EvalKey, Date | string | null>>;
 

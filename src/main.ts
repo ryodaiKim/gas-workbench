@@ -304,20 +304,13 @@ function processDueRows() {
         const ctx = buildContext(row, groupLabel, settings, { 評価予定日: evalDateStr });
         const subject = renderTemplate(subjectTpl, ctx);
         const html = renderTemplate(bodyTpl, ctx);
+        const { toSend, ccSend, bccSend } = resolveRecipientsForRow(settings, row, globalTo, globalCc, globalBcc);
         try {
-          const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID));
-          const toSend = to.length ? to : globalTo;
-          const ccSend = cc.length ? cc : globalCc;
-          const bccSend = bcc.length ? bcc : globalBcc;
           sendMail(toSend, subject, html, ccSend, bccSend);
           // ログは「原タイミング」（例：1M-1W）で記録する
           appendLog(row.被験者ID, 登録医療機関, col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID));
-          const toSend = to.length ? to : globalTo;
-          const ccSend = cc.length ? cc : globalCc;
-          const bccSend = bcc.length ? bcc : globalBcc;
           appendLog(row.被験者ID, 登録医療機関, col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, msg);
         }
       });
@@ -419,6 +412,21 @@ function getRecipientsForSubject(settings: Settings, subjectId: string): { to: s
   const cc = splitEmails(mappedCc || (settings as any).CC);
   const bcc = splitEmails(mappedBcc || (settings as any).BCC);
   return { to, cc, bcc };
+}
+
+function resolveRecipientsForRow(
+  settings: Settings,
+  row: RecordRow,
+  globalTo: string[],
+  globalCc: string[],
+  globalBcc: string[]
+): { toSend: string[]; ccSend: string[]; bccSend: string[] } {
+  const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID || ''));
+  const customTo = splitEmails(String((row as any).カスタム宛先 || ''));
+  const toSend = customTo.length ? customTo : (to.length ? to : globalTo);
+  const ccSend = cc.length ? cc : globalCc;
+  const bccSend = bcc.length ? bcc : globalBcc;
+  return { toSend, ccSend, bccSend };
 }
 
 // (removed duplicate simpler implementation)
@@ -794,10 +802,7 @@ function sendOverdueRemindersNow(when: Date): { total: number; success: number; 
       const ctx = buildContext(rowObj, it.groupLabel, settings, { 評価予定日: evalDateStr });
       const subject = renderTemplate(subjectTpl, ctx);
       const html = renderTemplate(bodyTpl, ctx);
-      const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj.被験者ID));
-      const toSend = to.length ? to : globalTo;
-      const ccSend = cc.length ? cc : globalCc;
-      const bccSend = bcc.length ? bcc : globalBcc;
+      const { toSend, ccSend, bccSend } = resolveRecipientsForRow(settings, rowObj, globalTo, globalCc, globalBcc);
       sendMail(toSend, subject, html, ccSend, bccSend);
       appendLog(String(rowObj.被験者ID), it.登録医療機関, it.col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
       success++;
@@ -805,10 +810,8 @@ function sendOverdueRemindersNow(when: Date): { total: number; success: number; 
       try {
         const rows = getSheetRows(it.sheetName);
         const rowObj = rows[it.row - 2];
-        const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj?.被験者ID || it.被験者ID));
-        const toSend = to.length ? to : globalTo;
-        const ccSend = cc.length ? cc : globalCc;
-        const bccSend = bcc.length ? bcc : globalBcc;
+        const fallbackRow = ({ 被験者ID: String(it.被験者ID) } as RecordRow);
+        const { toSend, ccSend, bccSend } = resolveRecipientsForRow(settings, rowObj || fallbackRow, globalTo, globalCc, globalBcc);
         appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, it.col, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
       } catch (_) {
         // ignore logging error
@@ -909,10 +912,7 @@ function sendEvalAlertRemindersNow(): { total: number; success: number; failure:
       const ctx = buildContext(rowObj, groupLabelFrom(it.group), settings, { 評価予定日: evalDateStr });
       const subject = renderTemplate(subjectTpl, ctx);
       const html = renderTemplate(bodyTpl, ctx);
-      const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj.被験者ID));
-      const toSend = to.length ? to : globalTo;
-      const ccSend = cc.length ? cc : globalCc;
-      const bccSend = bcc.length ? bcc : globalBcc;
+      const { toSend, ccSend, bccSend } = resolveRecipientsForRow(settings, rowObj, globalTo, globalCc, globalBcc);
       sendMail(toSend, subject, html, ccSend, bccSend);
       // Log with synthetic timing label to distinguish
       appendLog(String(rowObj.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), true);
@@ -921,10 +921,8 @@ function sendEvalAlertRemindersNow(): { total: number; success: number; failure:
       try {
         const rows = getSheetRows(it.sheetName);
         const rowObj = rows[it.row - 2];
-        const { to, cc, bcc } = getRecipientsForSubject(settings, String(rowObj?.被験者ID || it.被験者ID));
-        const toSend = to.length ? to : globalTo;
-        const ccSend = cc.length ? cc : globalCc;
-        const bccSend = bcc.length ? bcc : globalBcc;
+        const fallbackRow = ({ 被験者ID: String(it.被験者ID) } as RecordRow);
+        const { toSend, ccSend, bccSend } = resolveRecipientsForRow(settings, rowObj || fallbackRow, globalTo, globalCc, globalBcc);
         appendLog(String(rowObj?.被験者ID || it.被験者ID), it.登録医療機関, `${it.group}:評価日アラート`, [toSend.join(','), ccSend.join(','), bccSend.join(',')].filter(Boolean).join(' | '), false, e instanceof Error ? e.message : String(e));
       } catch (_) { /* ignore */ }
       failure++;
