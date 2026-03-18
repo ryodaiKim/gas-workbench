@@ -79,6 +79,8 @@ function getSettings(): Settings {
   const looksLikeTable = headerRow.includes('登録機関') && headerRow.includes('登録機関コード') && headerRow.includes('送信先アドレス');
   let recipientsByCode: Record<string, string> | undefined;
   let namesByCode: Record<string, string> | undefined;
+  let ccByCode: Record<string, string> | undefined;
+  let bccByCode: Record<string, string> | undefined;
   if (headerHasMany && values.length >= 2) {
     // Header-layout: row1 headers, row2 values
     const data = values[1] || [];
@@ -90,17 +92,25 @@ function getSettings(): Settings {
     if (looksLikeTable && values.length >= 2) {
       recipientsByCode = {};
       namesByCode = {};
+      ccByCode = {};
+      bccByCode = {};
       const idxName = headerRow.indexOf('登録機関');
       const idxCode = headerRow.indexOf('登録機関コード');
       const idxTo = headerRow.indexOf('送信先アドレス');
+      const idxCc = headerRow.indexOf('CC');
+      const idxBcc = headerRow.indexOf('BCC');
       for (let r = 1; r < values.length; r++) {
         const row = values[r];
         const name = String(row[idxName] || '').trim();
         const code = String(row[idxCode] || '').trim().toUpperCase();
         const to = String(row[idxTo] || '').trim();
+        const cc = idxCc >= 0 ? String(row[idxCc] || '').trim() : '';
+        const bcc = idxBcc >= 0 ? String(row[idxBcc] || '').trim() : '';
         if (!code) continue;
         if (name) namesByCode[code] = name;
         if (to) recipientsByCode[code] = to;
+        if (cc) ccByCode[code] = cc;
+        if (bcc) bccByCode[code] = bcc;
       }
     }
   } else {
@@ -125,6 +135,8 @@ function getSettings(): Settings {
   const settings = map as Settings;
   if (recipientsByCode) settings.recipientsByCode = recipientsByCode;
   if (namesByCode) settings.namesByCode = namesByCode;
+  if (ccByCode) settings.ccByCode = ccByCode;
+  if (bccByCode) settings.bccByCode = bccByCode;
   return settings;
 }
 
