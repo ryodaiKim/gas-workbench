@@ -1,89 +1,46 @@
-# Visit Management Apps Script (clasp)
+# Visit Management Workspace
 
-Automated reminder emails and alerting from Google Sheets, developed locally with TypeScript and pushed via clasp.
+npm workspaces monorepo for Google Apps Script projects, developed locally with TypeScript and pushed via clasp.
 
-## Sheets and schema
+## Structure
 
-Supported sheets (by name):
+```
+projects/
+└── reminder-system/   Automated reminder emails & alerting from Google Sheets
+```
 
-- 管理表*（複数可）
-  - ヘッダー名で列を認識（列順は自由）。最低限の列:
-    - 自動送信On/Off（真偽）
-    - 被験者ID（例: SMC-0001）
-    - 登録日（日付）
-    - カスタム宛先（任意、行単位のTo上書き）
-    - タイミング列: 1M-1W, 1M+1W, 1M / 3M-2W, 3M+2W, 3M / 6M-2W, 6M+2W, 6M / 12M-1M, 12M+1M, 12M / 18M-1M, 18M+1M, 18M / 24M-1M, 24M+1M, 24M
-    - 評価日列: 評価日：1M, 3M, 6M, 12M, 18M, 24M
-  - 任意: 難プラID など
+## Getting Started
 
-- 設定（ヘッダー行 or キー/値 両対応）
-  - 登録機関名（別名: 登録機関）
-  - 登録機関コード（例: SMC）
-  - 送信先アドレス（カンマ/セミコロン/改行区切り可）
-  - CC, BCC（任意）
-  - メール件名, メール本文（HTML）
+```sh
+npm install          # install dependencies (hoisted to root)
+npm run build        # build all projects
+npm run push         # build & push all projects to Apps Script
+```
 
-- 使い方とワークフロー（任意、自動生成）
-  - デフォルト件名, デフォルト本文（HTML）を保持。旧「フォールバック*」キーも後方互換。
+## Working on a Single Project
 
-- 送信ログ（自動作成/上書き）
-  - ヘッダー: 被験者ID, 登録医療機関, 送信タイミング, 送信先, 送信日時, 送信結果
-  - 送信先は「To | CC | BCC」を連結して記録。
+```sh
+cd projects/reminder-system
+npm run build        # build this project only
+npm run push         # build & push this project only
+npm run watch        # watch mode (recompile on save)
+npm run deploy       # build, push, and list deployments
+```
 
-## 送信と重複防止
+## Adding a New Project
 
-- 本日一致のタイミングに対して `main()` がメール送信。
-- 同一日・同一対象の重複送信をログで抑止（表示名と元列名の両方で判定）。
-- CC/BCC を設定可能。ログの「送信先」に To/CC/BCC を記録。
-- `管理表*` の `カスタム宛先` に値がある行は、To をその値で上書き（設定シートの送信先より優先）。
+1. Create `projects/<name>/` with `src/`, `scripts/`, `docs/`
+2. Add `package.json` with project-specific scripts (no devDependencies needed — they're hoisted)
+3. Add `tsconfig.json` extending `../../tsconfig.json` with project-specific `outDir`/`rootDir`
+4. Add `.clasp.json` with the target script ID
+5. Add `.claspignore`
+6. Run `npm install` from root to register the new workspace
 
-## 色付けルール（自動アラート）
+## Shared Configuration
 
-- タイミングセル（例: 1M-1W, 1M, 1M+1W）
-  - グレー: 評価日が入力済み、または当該タイミングで成功ログあり（完了）
-  - 赤: 期日超過かつ未送信（過去日で当日ログなし）
-  - 白: 上記以外（赤は自動で白に戻す。グレーは白に戻さない）
-- 評価日セル（例: 評価日：1M）
-  - 赤: 同グループの3つのリマインダーすべて成功送信済み、かつ自身が未入力
-  - 入力されたら赤を解除
+| File                 | Purpose                                         |
+| -------------------- | ----------------------------------------------- |
+| Root `package.json`  | Workspace config, shared devDependencies        |
+| Root `tsconfig.json` | Base TypeScript options (target, module, types) |
 
-メニュー「アラート状況更新」で再計算します。
-
-## メニュー（リマインダー機能）
-
-- 自動送信を起動する（毎日9:00のトリガー作成）
-- 自動送信を停止する
-- 期限超過の未送信分を送信（確認ダイアログあり）
-- 評価日アラート対象へ送信（3通済み・評価日未入力の対象へ送信）
-- アラート状況更新
-- 当日リマインド送信テスト（本日の対象を即時送信）
-- スキーマ診断 / ドライラン / 任意日付プレビュー などの診断ツール
-
-## メールテンプレートのプレースホルダー
-
-- {{被験者ID}} / {{登録機関名}} / {{登録機関コード}}
-- {{送信タイミング}}（表示名）
-- {{登録日}} / {{今日}}
-- {{評価予定日}}（グループの基準タイミングの予定日: 1M, 3M, ...）
-
-## 開発とデプロイ
-
-1. 依存関係をインストール
-   ```sh
-   npm install
-   ```
-2. ビルド & プッシュ
-   ```sh
-   npm run push
-   ```
-3. シートを開いてメニューから「自動送信を起動する」を一度実行
-
-補足:
-- 複数の「管理表*」シートを自動スキャンします。
-- 「設定」はヘッダー行レイアウト/キー・値レイアウトどちらでも読み取ります。
-- 被験者IDの接頭辞と設定の登録機関コードから登録医療機関名を推定してログに記録します。
-
-## テスト
-
-- メニュー「単体テスト実行」で軽量テストを実行できます（主に日付計算）。
-
+Each project extends the root tsconfig and adds its own `outDir`, `rootDir`, and `include`.
