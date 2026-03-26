@@ -146,17 +146,28 @@ function extractIdFromDriveUrl(url: string): string {
 
 function isProcessableSourceFile(file: GoogleAppsScript.Drive.File): boolean {
   const mime = String(file.getMimeType() || '');
-  const lower = file.getName().toLowerCase();
-  return mime === MimeType.PDF || mime === MimeType.GOOGLE_DOCS || mime === 'application/vnd.google-apps.shortcut' || lower.endsWith('.pdf');
+  return (
+    mime === MimeType.PDF ||
+    mime === 'application/pdf' ||
+    mime === MimeType.GOOGLE_DOCS ||
+    mime === 'application/vnd.google-apps.document' ||
+    mime === 'application/vnd.google-apps.shortcut'
+  );
 }
 
 function listTargetPdfs(sourceUrlOrId: string): GoogleAppsScript.Drive.File[] {
   const id = extractIdFromDriveUrl(sourceUrlOrId);
+
+  // Try as a single processable file first, but skip folders
   try {
     const file = DriveApp.getFileById(id);
-    return isProcessableSourceFile(file) ? [file] : [];
+    const mime = String(file.getMimeType() || '');
+    if (mime !== 'application/vnd.google-apps.folder' && isProcessableSourceFile(file)) {
+      return [file];
+    }
+    // If it's a folder or non-processable file, fall through to folder logic
   } catch (_e) {
-    // Try as folder below.
+    // Not a file — try as folder below
   }
 
   const files: GoogleAppsScript.Drive.File[] = [];
@@ -194,38 +205,14 @@ function normalizeText(raw: string): string {
     .trim();
 }
 
-function extractTextFromPdfViaOcr(fileId: string): string {
-  const file = DriveApp.getFileById(fileId);
-  const mime = String(file.getMimeType() || '');
-  if (mime === MimeType.GOOGLE_DOCS) {
-    return normalizeText(DocumentApp.openById(fileId).getBody().getText());
-  }
-  if (mime !== MimeType.PDF && !file.getName().toLowerCase().endsWith('.pdf')) {
-    throw new Error(`OCR対象がPDFではありません: ${mime} (${file.getName()})`);
-  }
+function extractTextFromGoogleDoc(fileId: string): string {
+  return normalizeText(DocumentApp.openById(fileId).getBody().getText());
+}
 
+function extractTextFromPdfBlob(file: GoogleAppsScript.Drive.File): string {
   const blob = file.getBlob();
-  const blobMime = String(blob.getContentType() || '');
-  if (blobMime && blobMime !== MimeType.PDF && blobMime !== 'application/pdf') {
-    throw new Error(`OCR対象BlobがPDFではありません: ${blobMime} (${file.getName()})`);
-  }
-
-  const tempDocFile = Drive.Files.insert(
-    {
-      title: `ocr_${fileId}_${new Date().getTime()}`,
-      mimeType: MimeType.GOOGLE_DOCS,
-    },
-    blob,
-    { ocr: true, ocrLanguage: 'ja' }
-  );
-  const docId = tempDocFile.id;
-  if (!docId) throw new Error('OCR失敗: Google Doc作成に失敗しました');
-  try {
-    const text = DocumentApp.openById(docId).getBody().getText();
-    return normalizeText(text);
-  } finally {
-    DriveApp.getFileById(docId).setTrashed(true);
-  }
+  const text = blob.getDataAsString('UTF-8');
+  return normalizeText(text);
 }
 
 function resolveShortcutTarget(file: GoogleAppsScript.Drive.File): GoogleAppsScript.Drive.File {
@@ -239,19 +226,26 @@ function resolveShortcutTarget(file: GoogleAppsScript.Drive.File): GoogleAppsScr
 }
 
 function extractTextForSupportedFile(file: GoogleAppsScript.Drive.File): string {
+  const sourceMime = String(file.getMimeType() || '');
   const resolved = resolveShortcutTarget(file);
-  const mime = String(resolved.getMimeType() || '');
-  const lowerName = resolved.getName().toLowerCase();
+  const resolvedId = resolved.getId();
+  const resolvedMime = String(resolved.getMimeType() || '');
 
-  if (mime === MimeType.GOOGLE_DOCS) {
-    return normalizeText(DocumentApp.openById(resolved.getId()).getBody().getText());
+  Logger.log(
+    `[diag] source: id=${file.getId()}, name=${file.getName()}, mime=${sourceMime} | resolved: id=${resolvedId}, name=${resolved.getName()}, mime=${resolvedMime}`
+  );
+
+  if (resolvedMime === MimeType.GOOGLE_DOCS || resolvedMime === 'application/vnd.google-apps.document') {
+    return extractTextFromGoogleDoc(resolvedId);
   }
 
-  if (mime === MimeType.PDF || lowerName.endsWith('.pdf')) {
-    return extractTextFromPdfViaOcr(resolved.getId());
+  if (resolvedMime === MimeType.PDF || resolvedMime === 'application/pdf') {
+    return extractTextFromPdfBlob(resolved);
   }
 
-  throw new Error(`未対応ファイル形式: ${mime} (source=${file.getName()}, resolved=${resolved.getName()})`);
+  throw new Error(
+    `未対応ファイル形式: mime=${resolvedMime} (source=${file.getName()}, resolved=${resolved.getName()})`
+  );
 }
 
 function extractOne(text: string, labels: string[]): string {
@@ -409,8 +403,16 @@ function processUnreadPdfs(): { processed: number; inserted: number; skipped: nu
       processed += 1;
       inserted += records.length;
     } catch (e) {
+      const sourceMime = String(file.getMimeType() || '');
+      let resolvedMime = sourceMime;
+      try {
+        const resolved = resolveShortcutTarget(file);
+        resolvedMime = String(resolved.getMimeType() || '');
+      } catch (_) {
+        // ignore resolution failure in error path
+      }
       const message = e instanceof Error ? e.message : String(e);
-      appendLog(fileId, fileName, 'FAIL', message, 0);
+      appendLog(fileId, fileName, 'FAIL', `${message} [sourceMime=${sourceMime}, resolvedMime=${resolvedMime}]`, 0);
       failed += 1;
     }
   });
@@ -515,6 +517,74 @@ function renderDashboard(): void {
   }
 }
 
+function diagnoseFolderContents(): void {
+  const settings = getSettings();
+  const sourceUrl = settings.読み取りPDF格納先;
+  const id = extractIdFromDriveUrl(sourceUrl);
+
+  const sh = getSheetOrThrow(SHEET_NAMES.log);
+  ensureHeaders(sh, LOG_HEADERS);
+
+  appendLog('--', '--', 'SKIP', `[DIAG] 設定値: ${sourceUrl}`, 0);
+  appendLog('--', '--', 'SKIP', `[DIAG] 解析ID: ${id}`, 0);
+
+  // Check if ID resolves as a single file or folder
+  let isFolder = false;
+  try {
+    const f = DriveApp.getFileById(id);
+    const fMime = String(f.getMimeType() || '');
+    appendLog(id, f.getName(), 'SKIP', `[DIAG] IDはファイル: mime=${fMime}`, 0);
+    if (fMime === 'application/vnd.google-apps.folder') {
+      isFolder = true;
+      appendLog('--', '--', 'SKIP', `[DIAG] フォルダとして内容を走査します`, 0);
+    } else {
+      appendLog('--', '--', 'SKIP', `[DIAG] 単一ファイル → フィルタ: ${isProcessableSourceFile(f) ? 'MATCH' : 'REJECT'}`, 0);
+      return;
+    }
+  } catch (_) {
+    appendLog('--', '--', 'SKIP', `[DIAG] IDはファイルではない（フォルダとして試行）`, 0);
+    isFolder = true;
+  }
+
+  if (!isFolder) return;
+
+  // List ALL files in folder (no filter)
+  let folder: GoogleAppsScript.Drive.Folder;
+  try {
+    folder = DriveApp.getFolderById(id);
+  } catch (e) {
+    appendLog('--', '--', 'FAIL', `[DIAG] フォルダ取得失敗: ${e instanceof Error ? e.message : String(e)}`, 0);
+    return;
+  }
+
+  appendLog('--', folder.getName(), 'SKIP', `[DIAG] フォルダ名: ${folder.getName()}`, 0);
+
+  const it = folder.getFiles();
+  let total = 0;
+  let accepted = 0;
+  while (it.hasNext()) {
+    const file = it.next();
+    const mime = String(file.getMimeType() || '');
+    const passes = isProcessableSourceFile(file);
+    const tag = passes ? 'MATCH' : 'REJECT';
+    appendLog(file.getId(), file.getName(), 'SKIP', `[DIAG][${tag}] mime=${mime}`, 0);
+    total += 1;
+    if (passes) accepted += 1;
+  }
+
+  appendLog('--', '--', 'SKIP', `[DIAG] 合計: ${total}件, フィルタ通過: ${accepted}件, 除外: ${total - accepted}件`, 0);
+
+  // Also check processed set
+  const processedSet = getProcessedFileIds();
+  appendLog('--', '--', 'SKIP', `[DIAG] 処理済み(SUCCESS)ファイル数: ${processedSet.size}件`, 0);
+
+  SpreadsheetApp.getActive().toast(
+    `診断完了: フォルダ内${total}件, フィルタ通過${accepted}件 → ログシートを確認してください`,
+    'Diagnosis',
+    10
+  );
+}
+
 function runPipelineCore(showToast: boolean, syncTrigger = true): void {
   const result = processUnreadPdfs();
   renderDashboard();
@@ -559,5 +629,7 @@ function onOpen(): void {
     .addItem('今すぐ実行（トリガー同期あり）', 'runNow')
     .addItem('スケジュール設定を再作成', 'setup')
     .addItem('ダッシュボード再生成', 'rebuildDashboard')
+    .addSeparator()
+    .addItem('【診断】フォルダ内容を検査', 'diagnoseFolderContents')
     .addToUi();
 }
