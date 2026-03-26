@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p . && node scripts/postbuild.mjs",
     "watch": "tsc -w -p .",
+    "prepush": "npx clasp list > /dev/null 2>&1 || (echo \"[sample-registration-pipeline] clasp is not authenticated. Run: npx clasp login (or npx clasp login --no-localhost)\" && exit 1)",
     "push": "npm run build && npx clasp push",
     "deploy": "npm run build && npx clasp push && npx clasp deployments"
   }
