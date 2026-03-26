@@ -1,0 +1,12 @@
+{
+  "name": "sample-registration-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "push": "npm run build && npx clasp push",
+    "deploy": "npm run build && npx clasp push && npx clasp deployments"
+  }
+}
