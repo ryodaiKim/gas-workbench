@@ -66,20 +66,6 @@ const FREQ_ALIASES: Record<string, 'hour' | 'day' | 'week' | 'month'> = {
   毎月: 'month',
 };
 
-const ITEM_NORMALIZATION: Array<[RegExp, string]> = [
-  [/dna\s*抽出/i, 'ＤＮＡ抽出（Ｎ）'],
-  [/リンパ球.*11|リンパ球.*１１/i, 'リンパ球株化１１'],
-  [/血清.*分離/i, '血清分離（用手法）'],
-  [/血漿.*分離/i, '血漿分離（用手法）'],
-];
-
-const ITEM_ANCHOR_PATTERNS = [
-  /ＤＮＡ抽出（?Ｎ）?/,
-  /リンパ球株化[1１][1１]/,
-  /血清分離（?用手法）?/,
-  /血漿分離（?用手法）?/,
-];
-
 function getSheetOrThrow(name: string): GoogleAppsScript.Spreadsheet.Sheet {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(name);
@@ -209,10 +195,29 @@ function extractTextFromGoogleDoc(fileId: string): string {
   return normalizeText(DocumentApp.openById(fileId).getBody().getText());
 }
 
-function extractTextFromPdfBlob(file: GoogleAppsScript.Drive.File): string {
-  const blob = file.getBlob();
-  const text = blob.getDataAsString('UTF-8');
-  return normalizeText(text);
+function ocrPdfViaFetch(fileId: string, fileName: string): string {
+  const token = ScriptApp.getOAuthToken();
+  const url = `https://www.googleapis.com/drive/v2/files/${fileId}?alt=media`;
+  const response = UrlFetchApp.fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    muteHttpExceptions: true,
+  });
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`PDF取得失敗: HTTP ${response.getResponseCode()} (${fileName})`);
+  }
+  const blob = response.getBlob().setName(`ocr_${fileId}.pdf`).setContentType('application/pdf');
+  const tempDoc = Drive.Files.insert(
+    { title: `ocr_${fileId}_${new Date().getTime()}`, mimeType: MimeType.GOOGLE_DOCS },
+    blob,
+    { ocr: true, ocrLanguage: 'ja' }
+  );
+  const docId = tempDoc.id;
+  if (!docId) throw new Error('OCR失敗: Doc作成失敗');
+  try {
+    return normalizeText(DocumentApp.openById(docId).getBody().getText());
+  } finally {
+    DriveApp.getFileById(docId).setTrashed(true);
+  }
 }
 
 function resolveShortcutTarget(file: GoogleAppsScript.Drive.File): GoogleAppsScript.Drive.File {
@@ -226,41 +231,117 @@ function resolveShortcutTarget(file: GoogleAppsScript.Drive.File): GoogleAppsScr
 }
 
 function extractTextForSupportedFile(file: GoogleAppsScript.Drive.File): string {
-  const sourceMime = String(file.getMimeType() || '');
   const resolved = resolveShortcutTarget(file);
   const resolvedId = resolved.getId();
   const resolvedMime = String(resolved.getMimeType() || '');
+  const resolvedName = resolved.getName();
 
-  Logger.log(
-    `[diag] source: id=${file.getId()}, name=${file.getName()}, mime=${sourceMime} | resolved: id=${resolvedId}, name=${resolved.getName()}, mime=${resolvedMime}`
-  );
+  Logger.log(`[diag] resolved: id=${resolvedId}, name=${resolvedName}, mime=${resolvedMime}`);
 
-  if (resolvedMime === MimeType.GOOGLE_DOCS || resolvedMime === 'application/vnd.google-apps.document') {
-    return extractTextFromGoogleDoc(resolvedId);
+  // Strategy 1: Try DocumentApp directly (works for Google Docs AND secretly-converted PDFs)
+  try {
+    const text = normalizeText(DocumentApp.openById(resolvedId).getBody().getText());
+    if (text.length > 50) {
+      Logger.log(`[diag] DocumentApp succeeded, length=${text.length}`);
+      return text;
+    }
+  } catch (e) {
+    Logger.log(`[diag] DocumentApp failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // Strategy 2: For PDFs, download raw bytes via UrlFetchApp and OCR
   if (resolvedMime === MimeType.PDF || resolvedMime === 'application/pdf') {
-    return extractTextFromPdfBlob(resolved);
+    Logger.log(`[diag] Trying OCR via UrlFetchApp for ${resolvedName}`);
+    return ocrPdfViaFetch(resolvedId, resolvedName);
   }
 
-  throw new Error(
-    `未対応ファイル形式: mime=${resolvedMime} (source=${file.getName()}, resolved=${resolved.getName()})`
-  );
+  throw new Error(`テキスト抽出不可: mime=${resolvedMime} (${resolvedName})`);
 }
 
-function extractOne(text: string, labels: string[]): string {
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+// ---------------------------------------------------------------------------
+// Parser: table-format clinical specimen receipt documents (治験受付検体一覧)
+// ---------------------------------------------------------------------------
+
+function extractTrialName(text: string): string {
+  const m = text.match(/試験名[：:]\s*(.+)/);
+  return m ? m[1].trim() : 'レジストリ研究';
+}
+
+function extractDocumentYear(text: string): string {
+  // Try 治験受付日 or 発信日 for the year
+  const patterns = [
+    /(?:治験)?受付日[：:\s]*(\d{4})/,
+    /発信日[：:\s]*(\d{4})/,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return m[1];
+  }
+  return String(new Date().getFullYear());
+}
+
+type FacilityBlock = { name: string; code: string; index: number };
+
+function extractFacilityBlocks(text: string): FacilityBlock[] {
+  const blocks: FacilityBlock[] = [];
+  const lines = text.split('\n');
+  let offset = 0;
+
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    for (const label of labels) {
-      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(`^${escaped}\\s*[:：]?\\s*(.+)$`);
-      const m = line.match(re);
-      if (m && m[1]) return m[1].trim();
-      if (line === label && lines[i + 1]) return lines[i + 1].trim();
+    const line = lines[i].trim();
+    const lineIndex = offset;
+    offset += lines[i].length + 1;
+
+    if (!/(?:病院|大学|センター|医院|クリニック)/.test(line)) continue;
+
+    // Check same line for 5-digit code
+    const sameMatch = line.match(/(\d{5})/);
+    if (sameMatch) {
+      const name = line.replace(/\d{5}/, '').replace(/[*□\s\u3000]/g, '').trim();
+      if (name) blocks.push({ name, code: sameMatch[1], index: lineIndex });
+      continue;
+    }
+    // Check next line
+    if (i + 1 < lines.length) {
+      const nextLine = lines[i + 1].trim();
+      const nextMatch = nextLine.match(/^(\d{5})$/);
+      if (nextMatch) {
+        const name = line.replace(/[*□\s\u3000]/g, '').trim();
+        if (name) blocks.push({ name, code: nextMatch[1], index: lineIndex });
+      }
     }
   }
-  return '';
+  return blocks;
+}
+
+function findLastBefore<T extends { index: number }>(items: T[], position: number): T | null {
+  let best: T | null = null;
+  for (const item of items) {
+    if (item.index <= position) best = item;
+  }
+  return best;
+}
+
+function expandItemGroup(rawText: string): string[] {
+  const parts = rawText.split(/[・\·、,]/);
+  const items: string[] = [];
+
+  for (const part of parts) {
+    const t = part.trim();
+    if (!t) continue;
+    if (/dna|ＤＮＡ|DNA/i.test(t)) {
+      items.push('ＤＮＡ抽出（Ｎ）');
+    } else if (/株化.*リンパ|リンパ.*株化|リンパ球/i.test(t)) {
+      items.push('リンパ球株化１１');
+    } else if (/血清/i.test(t)) {
+      items.push('血清分離（用手法）');
+    } else if (/血漿/i.test(t)) {
+      items.push('血漿分離（用手法）');
+    } else {
+      items.push(t);
+    }
+  }
+  return Array.from(new Set(items));
 }
 
 function normalizeGender(value: string): string {
@@ -271,103 +352,152 @@ function normalizeGender(value: string): string {
   return s;
 }
 
-function normalizeDateYmd(value: string): string {
-  const s = String(value || '').trim();
-  if (!s) return '';
-  const compact = s.replace(/[年月\/\-.日\s]/g, '');
-  if (/^\d{8}$/.test(compact)) return compact;
-  const m = s.match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/);
-  if (m) {
-    const y = m[1];
-    const mo = m[2].padStart(2, '0');
-    const d = m[3].padStart(2, '0');
-    return `${y}${mo}${d}`;
+type PositionedSubject = { id: string; index: number };
+type PositionedGender = { value: string; index: number };
+type PositionedPoint = { value: string; index: number };
+
+function collectSubjects(text: string): PositionedSubject[] {
+  const results: PositionedSubject[] = [];
+  const re = /CIDP-([A-Z]{3})-(\d{4})/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    results.push({ id: m[0], index: m.index });
   }
-  return compact;
+  // Deduplicate consecutive duplicates (OCR often repeats the same ID)
+  return results.filter((item, i) => i === 0 || item.id !== results[i - 1].id || item.index - results[i - 1].index > 50);
 }
 
-function normalizeTestItem(value: string): string {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  for (const [re, normalized] of ITEM_NORMALIZATION) {
-    if (re.test(raw)) return normalized;
+function collectGenders(text: string): PositionedGender[] {
+  const results: PositionedGender[] = [];
+  // Match standalone 男/女 (not inside longer words)
+  const re = /(?:^|[\s\t])([男女])(?:[\s\t]|$)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    results.push({ value: m[1], index: m.index });
   }
-  return raw.replace(/\s+/g, '');
+  return results;
 }
 
-function extractTestItems(text: string): string[] {
-  const startMatchers = ['検査項目', '検体項目'];
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const items: string[] = [];
-  let inItems = false;
+function collectPoints(text: string): PositionedPoint[] {
+  const results: PositionedPoint[] = [];
+  const re = /(初回登録時|追跡時[（(][^）)]*[）)])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    results.push({ value: m[1], index: m.index });
+  }
+  return results;
+}
 
-  for (const line of lines) {
-    if (!inItems && startMatchers.some((k) => line.includes(k))) {
-      inItems = true;
-      const suffix = line.split(/[：:]/).slice(1).join(':').trim();
-      if (suffix) items.push(suffix);
-      continue;
+type ItemGroupMatch = { rawItems: string; index: number };
+
+function collectItemGroups(text: string): ItemGroupMatch[] {
+  const results: ItemGroupMatch[] = [];
+  // Match NNN【content】 — bracket may be unclosed in OCR text
+  const re = /\d{3}【([^】\n]+)】?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1].trim()) results.push({ rawItems: m[1].trim(), index: m.index });
+  }
+  return results;
+}
+
+function findDateNear(text: string, position: number): { month: string; day: string } | null {
+  // Search in a window around the item group (after is more common in table layout)
+  const start = Math.max(0, position - 100);
+  const end = Math.min(text.length, position + 300);
+  const window = text.slice(start, end);
+
+  const patterns = [
+    /(\d{1,2})\s*月\s*(\d{1,2})\s*日?/,
+    /(\d{1,2})\s+(\d{1,2})(?:\s|$)/,
+  ];
+  for (const p of patterns) {
+    const m = window.match(p);
+    if (m) {
+      const month = parseInt(m[1], 10);
+      const day = parseInt(m[2], 10);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return { month: String(month), day: String(day) };
+      }
     }
-    if (!inItems) continue;
-    if (/^(備考|連絡|施設|試験名|被験者|採取日|ポイント名)/.test(line)) break;
-    if (/^[\-\*・●]/.test(line) || /（.*）/.test(line) || /分離|抽出|株化/.test(line)) {
-      items.push(line.replace(/^[\-\*・●]\s*/, '').trim());
-    }
   }
-
-  const normalized = items.map(normalizeTestItem).filter(Boolean);
-  const dedup = Array.from(new Set(normalized));
-  return dedup;
-}
-
-function extractKnownItemsFromText(text: string): string[] {
-  const compact = text.replace(/\s+/g, '');
-  const results: string[] = [];
-  if (/Ｄ?Ｎ?Ａ?抽出/.test(compact)) results.push('ＤＮＡ抽出（Ｎ）');
-  if (/リンパ球.*株化.*[1１][1１]/.test(compact)) results.push('リンパ球株化１１');
-  if (/血清.*分離/.test(compact)) results.push('血清分離（用手法）');
-  if (/血漿.*分離/.test(compact)) results.push('血漿分離（用手法）');
-  return Array.from(new Set(results));
+  return null;
 }
 
 function parseRecordsFromOcrText(text: string): ParsedRecord[] {
-  const trialName = extractOne(text, ['試験名', '研究名']) || 'レジストリ研究';
-  const facilityCode = extractOne(text, ['施設コード', '医療機関コード']);
-  const facilityName = extractOne(text, ['施設名', '医療機関名']);
-  const subjectId = extractOne(text, ['被験者番号', '被験者ID', '症例番号']);
-  const gender = normalizeGender(extractOne(text, ['性別']));
-  const collectionDate = normalizeDateYmd(extractOne(text, ['採取日', '採血日']));
-  const pointName = extractOne(text, ['ポイント名', '来院ポイント', 'Visit']) || '初回登録時';
-  let items = extractTestItems(text);
-  if (items.length === 0) {
-    items = extractKnownItemsFromText(text);
-  }
-  if (items.length === 0 && ITEM_ANCHOR_PATTERNS.some((re) => re.test(text))) {
-    items = ['ＤＮＡ抽出（Ｎ）', 'リンパ球株化１１', '血清分離（用手法）', '血漿分離（用手法）'].filter((x) =>
-      x.includes('ＤＮＡ')
-        ? /Ｄ?Ｎ?Ａ?抽出/.test(text)
-        : x.includes('リンパ球')
-        ? /リンパ球/.test(text)
-        : x.includes('血清')
-        ? /血清/.test(text)
-        : /血漿/.test(text)
-    );
+  const trialName = extractTrialName(text);
+  const year = extractDocumentYear(text);
+  const facilityBlocks = extractFacilityBlocks(text);
+  const subjects = collectSubjects(text);
+  const genders = collectGenders(text);
+  const points = collectPoints(text);
+  const itemGroups = collectItemGroups(text);
+
+  Logger.log(`[diag] parse: year=${year}, facilities=${facilityBlocks.length}, subjects=${subjects.length}, genders=${genders.length}, points=${points.length}, itemGroups=${itemGroups.length}`);
+
+  if (itemGroups.length === 0) {
+    throw new Error(`テーブル行（【検査項目】）が見つかりません。text preview: ${text.slice(0, 500)}`);
   }
 
-  if (!facilityCode || !facilityName || !subjectId || !collectionDate || items.length === 0) {
-    throw new Error('OCR解析に必要な項目を抽出できませんでした');
+  // Deduplicate facility blocks — keep unique name+code, prefer later (table body) over header
+  const seenFacility = new Map<string, FacilityBlock>();
+  for (const fb of facilityBlocks) {
+    seenFacility.set(fb.code, fb);
+  }
+  const dedupFacilities = Array.from(seenFacility.values());
+
+  const records: ParsedRecord[] = [];
+
+  for (const ig of itemGroups) {
+    // Find nearest subject before this item group
+    const subject = findLastBefore(subjects, ig.index);
+    // Find nearest facility before this item group (prefer table-body occurrence)
+    const facility = findLastBefore(dedupFacilities, ig.index) || dedupFacilities[0] || null;
+    // Find nearest gender before this item group
+    const gender = findLastBefore(genders, ig.index);
+    // Find nearest point before this item group
+    const point = findLastBefore(points, ig.index);
+    // Find date near this item group
+    const date = findDateNear(text, ig.index);
+
+    const subjectId = subject ? subject.id : '';
+    const facilityCode = facility ? facility.code : '';
+    const facilityName = facility ? facility.name : '';
+    const genderStr = gender ? normalizeGender(gender.value) : '';
+    const pointStr = point ? point.value : '初回登録時';
+    const dateStr = date
+      ? `${year}${date.month.padStart(2, '0')}${date.day.padStart(2, '0')}`
+      : '';
+
+    const items = expandItemGroup(ig.rawItems);
+    for (const item of items) {
+      records.push({
+        試験名: trialName,
+        施設コード: facilityCode,
+        施設名: facilityName,
+        被験者番号: subjectId,
+        性別: genderStr,
+        採取日: dateStr,
+        ポイント名: pointStr,
+        検査項目: item,
+      });
+    }
   }
 
-  return items.map((item) => ({
-    試験名: trialName,
-    施設コード: facilityCode,
-    施設名: facilityName,
-    被験者番号: subjectId,
-    性別: gender,
-    採取日: collectionDate,
-    ポイント名: pointName,
-    検査項目: item,
-  }));
+  if (records.length === 0) {
+    throw new Error('解析結果が0件です');
+  }
+
+  // Validate critical fields
+  const missing: string[] = [];
+  if (records.some((r) => !r.被験者番号)) missing.push('被験者番号');
+  if (records.some((r) => !r.施設コード)) missing.push('施設コード');
+  if (records.some((r) => !r.採取日)) missing.push('採取日');
+  if (missing.length > 0) {
+    Logger.log(`[diag] 欠損フィールド: ${missing.join(', ')}`);
+  }
+
+  return records;
 }
 
 function appendRecords(records: ParsedRecord[]): void {
