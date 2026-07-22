@@ -32,7 +32,7 @@ npm run deploy       # build, push, and list deployments
 
 1. Create `projects/<name>/` with `src/`, `scripts/`, `docs/`
 2. Add `package.json` with project-specific scripts (no devDependencies needed — they're hoisted)
-3. Add `tsconfig.json` extending `../../tsconfig.json` with project-specific `outDir`/`rootDir`
+3. Add `tsconfig.json` extending `../../tsconfig.base.json` with project-specific `outDir`/`rootDir`
 4. Add `.clasp.json` with the target script ID
 5. Add `.claspignore`
 6. Run `npm install` from root to register the new workspace
@@ -42,6 +42,6 @@ npm run deploy       # build, push, and list deployments
 | File                 | Purpose                                         |
 | -------------------- | ----------------------------------------------- |
 | Root `package.json`  | Workspace config, shared devDependencies        |
-| Root `tsconfig.json` | Base TypeScript options (target, module, types) |
+| Root `tsconfig.base.json` | Base TypeScript options (target, module, types) |
 
 Each project extends the root tsconfig and adds its own `outDir`, `rootDir`, and `include`.
