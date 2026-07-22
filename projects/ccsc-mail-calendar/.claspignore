@@ -1,0 +1,9 @@
+node_modules/
+**/*.map
+src/
+scripts/
+docs/
+README.md
+.clasp.json.example
+.eslintrc*
+.prettierrc*

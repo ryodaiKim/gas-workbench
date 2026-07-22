@@ -6,7 +6,8 @@ npm workspaces monorepo for Google Apps Script projects, developed locally with 
 
 ```
 projects/
-└── reminder-system/   Automated reminder emails & alerting from Google Sheets
+├── ccsc-mail-calendar/  CCSC reservation email → Google Calendar automation
+└── reminder-system/     Automated reminder emails & alerting from Google Sheets
 ```
 
 ## Getting Started

@@ -1,0 +1,15 @@
+{
+  "name": "ccsc-mail-calendar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p . && node scripts/postbuild.mjs",
+    "test": "npm run build && node scripts/test.mjs",
+    "watch": "tsc -w -p .",
+    "create": "npm run build && npx clasp create --type standalone --title \"CCSC Mail Calendar\" --rootDir build",
+    "push": "npm run build && npx clasp push",
+    "open": "npx clasp open-script",
+    "deploy": "npm run build && npx clasp push && npx clasp deployments"
+  }
+}
