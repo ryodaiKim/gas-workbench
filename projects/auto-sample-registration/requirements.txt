@@ -1,0 +1,7 @@
+opendataloader-pdf[hybrid]
+pdf2image
+pytesseract
+Pillow
+gspread
+google-auth
+python-dotenv

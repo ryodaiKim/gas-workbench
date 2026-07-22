@@ -435,8 +435,9 @@ function resolveRecipientsForRow(
 ): { toSend: string[]; ccSend: string[]; bccSend: string[] } {
   const { to, cc, bcc } = getRecipientsForSubject(settings, String(row.被験者ID || ''));
   const customTo = splitEmails(String((row as any).カスタム宛先 || ''));
+  const customCc = splitEmails(String((row as any).カスタムCC || ''));
   const toSend = customTo.length ? customTo : (to.length ? to : globalTo);
-  const ccSend = cc.length ? cc : globalCc;
+  const ccSend = customCc.length ? customCc : (cc.length ? cc : globalCc);
   const bccSend = bcc.length ? bcc : globalBcc;
   return { toSend, ccSend, bccSend };
 }
